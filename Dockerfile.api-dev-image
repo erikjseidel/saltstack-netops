@@ -1,0 +1,5 @@
+FROM python:3.9
+WORKDIR /napalm-vyos
+COPY ./napalm-vyos/requirements.txt /napalm-vyos/requirements.txt
+RUN pip install --no-cache-dir --upgrade -r /napalm-vyos/requirements.txt
+COPY ./napalm-vyos/napalm_vyos /vyos-napalm/napalm_vyos

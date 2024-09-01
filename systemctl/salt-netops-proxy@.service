@@ -1,0 +1,22 @@
+[Unit]
+Description=dockerized salt-netops-proxy service for %i
+Wants=docker.service
+After=docker.service
+
+[Service]
+User=root
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker kill %i
+ExecStartPre=-/usr/bin/docker rm %i
+ExecStart=/usr/bin/docker run \
+	--name %i \
+	--volume "/etc/salt/proxy.d/proxy.conf:/etc/salt/proxy.d/proxy.conf:ro" \
+	--volume "/etc/salt/pki.%i:/etc/salt/pki:rw" \
+	--volume "/etc/salt_keys:/etc/salt_keys" \
+        erikjseidel/saltstack-3006.8-c2 \
+	salt-proxy --proxyid=%i
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

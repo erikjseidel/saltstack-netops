@@ -1,0 +1,26 @@
+[Unit]
+Description=dockerized salt-netops-master service
+Wants=docker.service
+After=docker.service
+
+[Service]
+User=root
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker kill master
+ExecStartPre=-/usr/bin/docker rm master
+ExecStart=/usr/bin/docker run \
+	--name master \
+	--volume "/srv/salt-netdb:/srv/salt-netdb:rw" \
+	--volume "/etc/salt/master.d/master.conf:/etc/salt/master.d/master.conf:ro" \
+	--volume "/etc/salt/master.d/_netdb.conf:/etc/salt/master.d/_netdb.conf:ro" \
+	--volume "/etc/salt_keys:/etc/salt_keys:ro" \
+	--volume "/etc/salt/pki.master:/etc/salt/pki:rw" \
+	--volume "/var/scratch:/var/scratch:rw" \
+	-p 4505-4506:4505-4506 -p 8000:8000 \
+        erikjseidel/saltstack-3006.8-c2 \
+	salt-master
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

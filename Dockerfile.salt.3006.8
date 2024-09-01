@@ -1,0 +1,18 @@
+FROM debian:bullseye
+RUN apt -y update && apt -y upgrade && \
+    apt -y install curl dumb-init wget pip && \
+    mkdir /etc/apt/keyrings && \
+    curl -fsSL -o /etc/apt/keyrings/salt-archive-keyring-2023.gpg https://repo.saltproject.io/salt/py3/debian/11/amd64/SALT-PROJECT-GPG-PUBKEY-2023.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/salt-archive-keyring-2023.gpg arch=amd64] https://repo.saltproject.io/salt/py3/debian/11/amd64/minor/3006.8 bullseye main" | tee /etc/apt/sources.list.d/salt.list && \
+    apt update && \
+    apt -y install salt-master salt-minion salt-ssh salt-syndic salt-cloud salt-api && \
+    salt-pip install --no-cache-dir --upgrade 'napalm>=5.0.0' \
+						paramiko \
+						'netmiko>=3.1.0' \
+						vyattaconfparser \
+						'redis>=4.5.0' \
+						'pydantic==2.8.2'
+
+COPY ./napalm-vyos/napalm_vyos /opt/saltstack/salt/lib/python3.10/napalm_vyos
+
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
