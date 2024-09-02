@@ -2,3 +2,6 @@ napalm>=5.0.0
 paramiko
 netmiko>=3.1.0
 vyattaconfparser
+pydantic==2.8.2
+netaddr>=1.2.1
+beartype
