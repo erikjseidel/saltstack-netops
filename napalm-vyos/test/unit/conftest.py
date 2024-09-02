@@ -43,6 +43,9 @@ class PatchedVyOSDriver(vyos.VyOSDriver):
         pass
 
     def is_alive(self):
+        """
+        Mock is_alive Napalm method.
+        """
         return {'is_alive': True}  # In testing everything works..
 
     def open(self):
@@ -56,12 +59,17 @@ class FakeVyOSDevice(BaseTestDouble):
         self.mode_config = False
 
     def send_command(self, command, **kwargs):
+        """
+        Mock send_command Napalm method.
+        """
         filename = '{}.text'.format(self.sanitize_text(command))
         full_path = self.find_file(filename)
         return self.read_txt_file(full_path)
 
     def config_mode(self):
+        """Mock exit_config Napalm method"""
         self.mode_config = True
 
     def exit_config_mode(self):
+        """Mock exit_config_mode Napalm method"""
         self.mode_config = False

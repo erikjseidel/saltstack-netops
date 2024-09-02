@@ -22,26 +22,22 @@ Read napalm.readthedocs.org for more information.
 
 import re
 import os
-import tempfile
 
+from netaddr import IPAddress
 import vyattaconfparser
 
 from napalm_vyos.utils.vyos_api import (
     VyosAPI,
     VyosAPIException,
-    VyosStartConfigException,
-    VyosExitConfigException,
 )
 
 from netmiko import __version__ as netmiko_version
-from netmiko import ConnectHandler
-from netmiko import SCPConn
 
 # NAPALM base
 import napalm.base.constants as C
 from napalm.base.base import NetworkDriver
 from napalm.base.exceptions import (
-    ConnectionException,
+    NapalmException,
     MergeConfigException,
     ReplaceConfigException,
     CommitError,
@@ -100,7 +96,8 @@ class VyOSDriver(NetworkDriver):
 
         fields = netmiko_version.split('.')
         fields = [int(x) for x in fields]
-        maj_ver, min_ver, bug_fix = fields
+        maj_ver, min_ver, _ = fields
+
         if maj_ver >= 2:
             netmiko_argument_map['allow_agent'] = False
         elif maj_ver == 1 and min_ver >= 1:
@@ -109,7 +106,7 @@ class VyOSDriver(NetworkDriver):
         # Build dict of any optional Netmiko args
         self.netmiko_optional_args = {}
         if optional_args is not None:
-            for k, v in netmiko_argument_map.items():
+            for k, _ in netmiko_argument_map.items():
                 try:
                     self.netmiko_optional_args[k] = optional_args[k]
                 except KeyError:
@@ -118,62 +115,79 @@ class VyOSDriver(NetworkDriver):
             self.port = optional_args.get('port', 22)
 
     def _reset(self):
+        """
+        Clear any pending merge candidate configuration that may exist
+
+        """
         self.device.reset_merge_candidate()
 
     def open(self):
-        # API is always 'open'
-        pass
+        """
+        Open a connection to the device. As Vyos API is stateless the connection can
+        always be considered 'open' we simply clear any pending merge candidate here.
+
+        """
+        self._reset()
 
     def close(self):
-        # Just clear whatever merge candidate we may have.
+        """
+        Close a connection to the device. As Vyos API is stateless the connection can
+        always be considered 'open' we simply clear any pending merge candidate here.
+
+        """
         self._reset()
 
     def load_merge_candidate(self, filename=None, config=None):
         """
         Only configuration in set-format is supported with load_merge_candidate.
         """
-
-        if not filename and not config:
-            raise MergeConfigException('filename or config param must be provided.')
-
         if filename is None:
-            temp_file = tempfile.NamedTemporaryFile(mode='w+')
-            temp_file.write(config)
-            temp_file.flush()
-            cfg_filename = temp_file.name
-        else:
-            cfg_filename = filename
+            if not config:
+                raise MergeConfigException('filename or config param must be provided.')
 
-        if os.path.exists(cfg_filename) is True:
-            with open(cfg_filename) as f:
-                self._new_config = f.read()
-                cfg = [x for x in self._new_config.split("\n") if x]
+            cfg = [x for x in config.split("\n") if x]
 
-                self.device.add_config_set(cfg)
+        elif os.path.exists(filename) is True:
+            with open(filename, encoding="utf-8") as f:
+                cfg = [x for x in f.read().split("\n") if x]
 
         else:
-            raise MergeConfigException("config file is not found")
+            raise MergeConfigException(f"config file {filename} is not found")
+
+        self.device.add_config_set(cfg)
 
     def discard_config(self):
+        """
+        Discard merge candidate configuration
+
+        """
         self._reset()
 
     def compare_config(self):
+        """
+        Compare a merge candidate configuration to the device's running configuration
+
+        """
         try:
             output_compare = self.device.compare()
         except VyosAPIException as e:
             self._reset()
-            raise CommitError(e.message)
+            raise CommitError(e.message) from e
 
         match = re.findall(
             "No changes between working and active configurations", output_compare
         )
         if match:
             return ""
-        else:
-            diff = ''.join(output_compare.splitlines(True))
-            return diff or ""
+
+        diff = ''.join(output_compare.splitlines(True))
+        return diff or ""
 
     def commit_config(self, message=""):
+        """
+        Commit a candidate configuration to the device
+
+        """
         if message:
             raise NotImplementedError(
                 "Commit message not implemented for this platform"
@@ -190,7 +204,7 @@ class VyOSDriver(NetworkDriver):
             self.device.save()
 
         except VyosAPIException as e:
-            raise CommitError(e.message)
+            raise CommitError(e.message) from e
 
     def rollback(self):
         """Rollback configuration to filename or to self.rollback_cfg file."""
@@ -201,33 +215,40 @@ class VyOSDriver(NetworkDriver):
             try:
                 self.device.load(filename)
             except VyosAPIException as e:
-                raise ReplaceConfigException("Failed rollback config: " + e.message)
+                raise ReplaceConfigException(
+                    "Failed rollback config: " + e.message
+                ) from e
 
     def get_environment(self):
         """
-        'vmstat' output:
-        procs -----------memory---------- ---swap-- -----io---- -system-- ----cpu----
-        r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa
-        0  0      0  61404 139624 139360    0    0     0     0    9   14  0  0 100  0
+        Return a dict containing certain device environmental information
+
         """
-        output_cpu_list = list()
+
+        #
+        #  'vmstat' output:
+        #  procs -----------memory---------- ---swap-- -----io---- -system-- ----cpu----
+        #  r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa
+        #  0  0      0  61404 139624 139360    0    0     0     0    9   14  0  0 100  0
+        #
+        output_cpu_list = []
         output_cpu = self.device.send_command("vmstat")
         output_cpu = str(output_cpu)
         output_cpu_list = output_cpu.split("\n")
-        if len(output_cpu_list[-1]) > 0:
-            output_cpu_list = output_cpu_list[-1]
-        else:
-            output_cpu_list = output_cpu_list[-2]
+        output_cpu_list = (
+            output_cpu_list[-1] if len(output_cpu_list[-1]) > 0 else output_cpu_list[-2]
+        )
         output_cpu_idle = output_cpu_list.split()[-2]
+
         cpu = 100 - int(output_cpu_idle)
 
-        """
-        'free' output:
-                     total       used       free     shared    buffers     cached
-        Mem:        508156     446784      61372          0     139624     139360
-        -/+ buffers/cache:     167800     340356
-        Swap:            0          0          0
-        """
+        #
+        #  'free' output:
+        #               total       used       free     shared    buffers     cached
+        #  Mem:        508156     446784      61372          0     139624     139360
+        #  -/+ buffers/cache:     167800     340356
+        #  Swap:            0          0          0
+        #
         output_ram = self.device.send_command("free").split("\n")[1]
         available_ram, used_ram = output_ram.split()[1:3]
 
@@ -275,7 +296,7 @@ class VyOSDriver(NetworkDriver):
         # Convert the configuration to dictionary
         config = vyattaconfparser.parse_conf(output_conf)
 
-        iface_dict = dict()
+        iface_dict = {}
 
         for iface_type in config["interfaces"]:
 
@@ -332,7 +353,7 @@ class VyOSDriver(NetworkDriver):
         # Skip the header line
         output = output[1:-1]
 
-        arp_table = list()
+        arp_table = []
         for line in output:
 
             line = line.split()
@@ -354,7 +375,6 @@ class VyOSDriver(NetworkDriver):
             )
 
         return arp_table
-
 
     def get_bgp_neighbors(self):
         # 'description', 'sent_prefixes' and 'received_prefixes' are not implemented yet
@@ -384,8 +404,7 @@ class VyOSDriver(NetworkDriver):
         router_id = match.group(1)
         local_as = int(match.group(2))
 
-        bgp_neighbor_data = dict()
-        bgp_neighbor_data["global"] = dict()
+        bgp_neighbor_data = {'global': {}}
         bgp_neighbor_data["global"]["router_id"] = router_id
         bgp_neighbor_data["global"]["peers"] = {}
 
@@ -398,11 +417,11 @@ class VyOSDriver(NetworkDriver):
                     peer_id,
                     bgp_version,
                     remote_as,
-                    msg_rcvd,
-                    msg_sent,
-                    table_version,
-                    in_queue,
-                    out_queue,
+                    _,  # msg_rcvd
+                    _,  # msg_sent
+                    _,  # table_version
+                    _,  # in_queue
+                    _,  # out_queue
                     up_time,
                     state_prefix,
                 ) = i.split()
@@ -420,23 +439,19 @@ class VyOSDriver(NetworkDriver):
                     received_prefixes = -1
                     is_up = False
 
-                if bgp_version == "4":
-                    address_family = "ipv4"
-                elif bgp_version == "6":
-                    address_family = "ipv6"
-                else:
+                if bgp_version not in ["4", "6"]:
                     raise ValueError("BGP neighbor parsing failed")
 
-                """
-                'show ip bgp neighbors 192.168.1.1' output example:
-                BGP neighbor is 192.168.1.1, remote AS 64519, local AS 64520, external link
-                BGP version 4, remote router ID 192.168.1.1
-                For address family: IPv4 Unicast
-                ~~~
-                Community attribute sent to this neighbor(both)
-                1 accepted prefixes
-                ~~~
-                """
+                #
+                #  'show ip bgp neighbors 192.168.1.1' output example:
+                #  BGP neighbor is 192.168.1.1, remote AS 64519, local AS 64520, external link
+                #  BGP version 4, remote router ID 192.168.1.1
+                #  For address family: IPv4 Unicast
+                #  ~~~
+                #  Community attribute sent to this neighbor(both)
+                #  1 accepted prefixes
+                #  ~~~
+                #
                 bgp_detail = self.device.send_command(
                     "show ip bgp neighbors %s" % peer_id
                 )
@@ -462,11 +477,12 @@ class VyOSDriver(NetworkDriver):
                     "remote_as": int(remote_as),
                 }
 
-                af_dict = dict()
-                af_dict[address_family] = {
-                    "sent_prefixes": int(-1),
-                    "accepted_prefixes": int(accepted_prefixes),
-                    "received_prefixes": int(received_prefixes),
+                af_dict = {
+                    'address_family': {
+                        "sent_prefixes": int(-1),
+                        "accepted_prefixes": int(accepted_prefixes),
+                        "received_prefixes": int(received_prefixes),
+                    }
                 }
 
                 peer_dict["address_family"] = af_dict
@@ -479,41 +495,46 @@ class VyOSDriver(NetworkDriver):
 
         if "never" in bgp_uptime:
             return -1
+
+        if "y" in bgp_uptime:
+            match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
+            uptime = (
+                (int(match.group(1)) * self._YEAR_SECONDS)
+                + (int(match.group(3)) * self._WEEK_SECONDS)
+                + (int(match.group(5)) * self._DAY_SECONDS)
+            )
+
+        elif "w" in bgp_uptime:
+            match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
+            uptime = (
+                (int(match.group(1)) * self._WEEK_SECONDS)
+                + (int(match.group(3)) * self._DAY_SECONDS)
+                + (int(match.group(5)) * self._HOUR_SECONDS)
+            )
+
+        elif "d" in bgp_uptime:
+            match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
+            uptime = (
+                (int(match.group(1)) * self._DAY_SECONDS)
+                + (int(match.group(3)) * self._HOUR_SECONDS)
+                + (int(match.group(5)) * self._MINUTE_SECONDS)
+            )
+
         else:
-            if "y" in bgp_uptime:
-                match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
-                uptime = (
-                    (int(match.group(1)) * self._YEAR_SECONDS)
-                    + (int(match.group(3)) * self._WEEK_SECONDS)
-                    + (int(match.group(5)) * self._DAY_SECONDS)
-                )
-                return uptime
-            elif "w" in bgp_uptime:
-                match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
-                uptime = (
-                    (int(match.group(1)) * self._WEEK_SECONDS)
-                    + (int(match.group(3)) * self._DAY_SECONDS)
-                    + (int(match.group(5)) * self._HOUR_SECONDS)
-                )
-                return uptime
-            elif "d" in bgp_uptime:
-                match = re.search(r"(\d+)(\w)(\d+)(\w)(\d+)(\w)", bgp_uptime)
-                uptime = (
-                    (int(match.group(1)) * self._DAY_SECONDS)
-                    + (int(match.group(3)) * self._HOUR_SECONDS)
-                    + (int(match.group(5)) * self._MINUTE_SECONDS)
-                )
-                return uptime
-            else:
-                hours, minutes, seconds = map(int, bgp_uptime.split(":"))
-                uptime = (
-                    (hours * self._HOUR_SECONDS)
-                    + (minutes * self._MINUTE_SECONDS)
-                    + seconds
-                )
-                return uptime
+            hours, minutes, seconds = map(int, bgp_uptime.split(":"))
+            uptime = (
+                (hours * self._HOUR_SECONDS)
+                + (minutes * self._MINUTE_SECONDS)
+                + seconds
+            )
+
+        return uptime
 
     def get_lldp_neighbors(self):
+        """
+        Return a dict containing information about device's LLDP neighbors
+
+        """
         # Multiple neighbors per port are not implemented
         # The show lldp neighbors commands lists port descriptions, not IDs
         output = self.device.send_command("show lldp neighbors detail")
@@ -555,7 +576,7 @@ class VyOSDriver(NetworkDriver):
         interfaces = re.findall(r"(\S+): <.*", output)
         # count = re.findall("(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+", output)
         count = re.findall(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", output)
-        counters = dict()
+        counters = {}
 
         j = 0
 
@@ -591,14 +612,16 @@ class VyOSDriver(NetworkDriver):
         return counters
 
     def get_snmp_information(self):
-        # 'acl' is not implemented yet
+        """
+        Return a dict containing device SNMP configuration. ACL not implemented.
+
+        """
 
         output = self.device.send_command("show configuration")
         # convert the configuration to dictionary
         config = vyattaconfparser.parse_conf(output)
 
-        snmp = dict()
-        snmp["community"] = dict()
+        snmp = {'community': {}}
 
         try:
             for i in config["service"]["snmp"]["community"]:
@@ -626,6 +649,10 @@ class VyOSDriver(NetworkDriver):
             return {}
 
     def get_facts(self):
+        """
+        Return a dict containing basic information about the device
+
+        """
         output_uptime = self.device.send_command("cat /proc/uptime | awk '{print $1}'")
 
         uptime = int(float(output_uptime.split()[0]))
@@ -634,15 +661,8 @@ class VyOSDriver(NetworkDriver):
         ver_str = [line for line in output if "Version" in line][0]
         version = self.parse_version(ver_str)
 
-        above_1_1 = (
-            False if version.startswith('1.0') or version.startswith('1.1') else True
-        )
-        if above_1_1:
-            sn_str = [line for line in output if "Hardware S/N" in line][0]
-            hwmodel_str = [line for line in output if "Hardware model" in line][0]
-        else:
-            sn_str = [line for line in output if "S/N" in line][0]
-            hwmodel_str = [line for line in output if "HW model" in line][0]
+        sn_str = [line for line in output if "Hardware S/N" in line][0]
+        hwmodel_str = [line for line in output if "Hardware model" in line][0]
 
         snumber = self.parse_snumber(sn_str)
         hwmodel = self.parse_hwmodel(hwmodel_str)
@@ -660,7 +680,7 @@ class VyOSDriver(NetworkDriver):
         else:
             fqdn = ""
 
-        iface_list = list()
+        iface_list = []
         for iface_type in config["interfaces"]:
             for iface_name in config["interfaces"][iface_type]:
                 iface_list.append(iface_name)
@@ -680,20 +700,32 @@ class VyOSDriver(NetworkDriver):
 
     @staticmethod
     def parse_version(ver_str):
+        """
+        Parse the device version string
+        """
         version = ver_str.split()[-1]
         return version
 
     @staticmethod
     def parse_snumber(sn_str):
+        """
+        Parse the device Serial Number string
+        """
         sn = sn_str.split(":")
         return sn[1].strip()
 
     @staticmethod
     def parse_hwmodel(model_str):
+        """
+        Parse the device Hardware Model string
+        """
         model = model_str.split(":")
         return model[1].strip()
 
     def get_interfaces_ip(self):
+        """
+        Get IP addresses assigned to device interfaces
+        """
         output = self.device.send_command("show interfaces")
         output = output.split("\n")
 
@@ -703,7 +735,7 @@ class VyOSDriver(NetworkDriver):
         else:
             ifaces = [x for x in output[3:-1] if "-" not in x]
 
-        ifaces_ip = dict()
+        ifaces_ip = {}
 
         for iface in ifaces:
             iface = iface.split()
@@ -714,14 +746,14 @@ class VyOSDriver(NetworkDriver):
                 # Delete the "Interface" column
                 iface = iface[1:-1]
                 # Key initialization
-                ifaces_ip[iface_name] = dict()
+                ifaces_ip[iface_name] = {}
 
             ip_addr, mask = iface[0].split("/")
             ip_ver = self._get_ip_version(ip_addr)
 
             # Key initialization
             if ip_ver not in ifaces_ip[iface_name]:
-                ifaces_ip[iface_name][ip_ver] = dict()
+                ifaces_ip[iface_name][ip_ver] = {}
 
             ifaces_ip[iface_name][ip_ver][ip_addr] = {"prefix_length": int(mask)}
 
@@ -729,23 +761,25 @@ class VyOSDriver(NetworkDriver):
 
     @staticmethod
     def _get_ip_version(ip_address):
-        if ":" in ip_address:
-            return "ipv6"
-        elif "." in ip_address:
-            return "ipv4"
+        return "ipv" + int(IPAddress(ip_address).version)
 
     def get_users(self):
+        """
+        Get the system users
+
+        """
         output = self.device.send_command("show configuration commands").split("\n")
 
         user_conf = [x.split() for x in output if "login user" in x]
 
         # Collect all users' name
-        user_name = list(set([x[4] for x in user_conf]))
+        user_name = [x[4] for x in user_conf]
 
-        user_auth = dict()
+        user_auth = {}
 
         for user in user_name:
-            sshkeys = list()
+            sshkeys = []
+            password = ""
 
             # extract the configuration which relates to 'user'
             for line in [x for x in user_conf if user in x]:
@@ -773,8 +807,33 @@ class VyOSDriver(NetworkDriver):
         count=C.PING_COUNT,
         vrf=C.PING_VRF,
     ):
-        # does not support multiple destination yet
+        """
+        Run a ping command on the device. Does not support multiple destinations.
 
+        Arguments
+
+            destination:
+               Target host to ping
+
+            source:
+               Source IP address to use
+
+            ttl:
+               Set a Time-To-Live constraint on the ping
+
+            timeout:
+               Set a timeout constraint on the ping
+
+            size:
+               Set the size of the echo request packet
+
+            count:
+               Number of echo request packets to send
+
+            vrf:
+               Originate packets from a vrf
+
+        """
         deadline = timeout * count
 
         command = "ping %s " % destination
@@ -785,7 +844,7 @@ class VyOSDriver(NetworkDriver):
         if source != "":
             command += "interface %s " % source
 
-        ping_result = dict()
+        ping_result = {}
         output_ping = self.device.send_command(command)
 
         if "Unknown host" in output_ping:
@@ -834,7 +893,6 @@ class VyOSDriver(NetworkDriver):
                 rtt_max = None
                 rtt_stddev = None
 
-            ping_result["success"] = dict()
             ping_result["success"] = {
                 "probes_sent": sent,
                 "packet_loss": lost,
@@ -845,7 +903,7 @@ class VyOSDriver(NetworkDriver):
                 "results": [{"ip_address": destination, "rtt": rtt_avg}],
             }
 
-            return ping_result
+        return ping_result
 
     def get_config(self, retrieve="all", full=False, sanitized=False):
         """
@@ -860,20 +918,20 @@ class VyOSDriver(NetworkDriver):
             - startup(string) - Representation of the native startup configuration.
         """
         if retrieve not in ["running", "candidate", "startup", "all"]:
-            raise Exception(
+            raise NapalmException(
                 "ERROR: Not a valid option to retrieve.\nPlease select from 'running', 'candidate', "
                 "'startup', or 'all'"
             )
-        else:
-            config_dict = {"running": "", "startup": "", "candidate": ""}
-            if retrieve in ["running", "all"]:
-                config_dict['running'] = self._get_running_config()
-            if retrieve in ["startup", "all"]:
-                config_dict['startup'] = self.device.send_command(
-                    f"cat {self._BOOT_FILENAME}"
-                )
-            if retrieve in ["candidate", "all"]:
-                config_dict['candidate'] = self._new_config or ""
+
+        config_dict = {"running": "", "startup": "", "candidate": ""}
+        if retrieve in ["running", "all"]:
+            config_dict['running'] = self._get_running_config()
+        if retrieve in ["startup", "all"]:
+            config_dict['startup'] = self.device.send_command(
+                f"cat {self._BOOT_FILENAME}"
+            )
+        if retrieve in ["candidate", "all"]:
+            config_dict['candidate'] = self._new_config or ""
 
         return config_dict
 
@@ -883,11 +941,23 @@ class VyOSDriver(NetworkDriver):
         except VyosAPIException as e:
             return e.message
 
-    def get_vyos_config(self, path=[]):
+    def get_vyos_config(self, path=None):
+        """
+        Get configuration data from the device by path
+
+        Arguments
+
+            path: ``None``
+                What part of the configuration hierarchy to retrieve. Will retrieve entire
+                device configuration if set to None or [].
+
+        """
+        path = path or []
+
         try:
             return self.device.retrieve(path)
         except VyosAPIException as e:
-            raise CommandErrorException(e.message)
+            raise CommandErrorException(e.message) from e
 
     def cli(self, commands):
         """
@@ -902,8 +972,8 @@ class VyOSDriver(NetworkDriver):
             'show clock': u'*22:01:51.165 UTC Thu Feb 18 2016'}
 
         """
-        cli_output = dict()
-        if type(commands) is not list:
+        cli_output = {}
+        if not isinstance(commands, list):
             raise TypeError("Please enter a valid list of commands!")
 
         for command in commands:

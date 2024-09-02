@@ -11,7 +11,9 @@ RUN apt -y update && apt -y upgrade && \
 						'netmiko>=3.1.0' \
 						vyattaconfparser \
 						'redis>=4.5.0' \
-						'pydantic==2.8.2'
+						'pydantic==2.8.2' \
+						netaddr>=1.2.1 \
+						beartype
 
 COPY ./napalm-vyos/napalm_vyos /opt/saltstack/salt/lib/python3.10/napalm_vyos
 
